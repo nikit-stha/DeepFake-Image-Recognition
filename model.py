@@ -15,7 +15,7 @@ class FeatureEnhancementModule(nn.Module):
         self.phi2 = nn.Conv1d(in_channels, in_channels, kernel_size=1)
         self.phi3 = nn.Conv1d(in_channels, in_channels, kernel_size=1)
 
-    def compute_qco(self, x: torch.Tensor):
+    def compute_qco(self, x):
         B, C, H, W = x.shape
         x_flat = x.view(B, C, -1)
         
@@ -35,7 +35,7 @@ class FeatureEnhancementModule(nn.Module):
         
         return G, H_feat
 
-    def forward(self, L: torch.Tensor) -> torch.Tensor:
+    def forward(self, L):
         B, C, H_spatial, W_spatial = L.shape
         
         G, H_feat = self.compute_qco(L) 
