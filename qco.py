@@ -1,61 +1,67 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import torch.optim as optim
 
 class QCO(nn.Module):
-    def __init__(self, in_channels, levels=8):
+    def __init__(self, in_channels, levels = 16, hidden_layers = 64):
         super(QCO, self).__init__()
         self.levels = levels
-        self.mlp = nn.Sequential(
-            nn.Linear(2, in_channels),
+        self.hidden_layers = hidden_layers
+        self.in_channels = in_channels
+
+        self.MLP = nn.Sequential(
+            nn.Linear(2, self.hidden_layers),
             nn.ReLU(),
-            nn.Linear(in_channels, in_channels)
+            nn.Linear(self.hidden_layers, self.in_channels)
         )
 
     def forward(self, A):
         B, C, H, W = A.shape
 
+        #Global Average Pooling
         y = F.adaptive_avg_pool2d(A, 1)
 
-        A_flat = A.view(B, C, -1)
-        y_flat = y.view(B, C, 1)
+        #Cosine Similarity between A and y
+        P = F.cosine_similarity(A, y, dim=1)
 
-        P = F.cosine_similarity(A_flat, y_flat, dim=1)
+        #Flatten P
+        P_flat = P.view(B, -1)
 
-        P = P.view(B, H, W)
+        #P_max and P_min in each batch
+        P_max = P_flat.max(dim=1).values
+        P_min = P_flat.min(dim=1).values
 
-        P_min = P.amin(dim=(1, 2), keepdim=True)
-        P_max = P.amax(dim=(1, 2), keepdim=True)
+        #Quanrization to N Levels
+        U = []
+        for i in range(self.levels):
+            value = (((P_max - P_min) / self.levels) * (i + 1)) + P_min
+            U.append(value)
 
-        P_norm = (P - P_min) / (P_max - P_min + 1e-8)
+        U = torch.stack(U)
+        U = U.T
 
-        levels = torch.arange(self.levels, device=A.device).float()
-
-        step = 1.0 / self.levels
-        U = step * levels
-
-        U_flat = U.unsqueeze(0).expand(B, -1)
-
-        P_flat = P_norm.flatten(1)
+        U_expand = U.unsqueeze(1)
         P_expand = P_flat.unsqueeze(-1)
 
-        U_expand = U_flat.unsqueeze(1)
-
+        #Calculate Quantization Encoding Matrix
         distance = U_expand - P_expand
 
         mask = ((distance >= -0.5 / self.levels) & (distance < 0.5 / self.levels))
-
         G = torch.where(mask, 1 - torch.abs(distance), torch.zeros_like(distance))
 
+        #Calculate Mean Matrix
         count = G.sum(dim=1)
-        count_total = count.sum(dim=1, keepdim=True)
-        count = count / (count_total + 1e-8)
+        mean_matrix = count / (count.sum(dim=1, keepdim=True) + 1e-6)
 
-        T = torch.stack([U_flat, count], dim=-1)
+        #Concatenate Mean_Matrix and U to get Quantization Count Map
+        T = torch.stack([U, mean_matrix], dim = -1)
 
-        feature = self.mlp(T)
+        #Pass T through MultiLayer Perceptron (MLP)
+        X = self.MLP(T)
 
+        #Concatenate X and y(Global Average Pooled Feature) without loosing either features
         y = y.view(B, C).unsqueeze(1).expand(-1, self.levels, -1)
-        H = torch.cat([feature, y], dim=-1)
+        H = torch.cat([X, y], dim=-1)
 
-        return G, T, H
+        return H, G
